@@ -1,159 +1,115 @@
-ocity-full-pro/
-│── index.js              # Core Bot
-│── database.js           # SQLite Datenbank
-│── commands/             # Discord Slash Commands
-│   ├── addstreamer.js
-│   ├── removestreamer.js
-│   ├── liststreamer.js
-│── utils/                # Hilfsfunktionen
-│   ├── liveCheck.js
-│   ├── titleCheck.js
-│── web/                  # Web Dashboard
-│   ├── server.js
-│   ├── public/
-│       ├── index.html
-│       ├── style.css
-│       └── script.js
-│── package.json
-│── .env.example
-│── README.md
-require('dotenv').config();
+require("dotenv").config();
+
 const { Client, GatewayIntentBits } = require("discord.js");
 const db = require("./database");
 const { checkTwitchLive, checkTikTokLive } = require("./utils/liveCheck");
 const { validateTitle } = require("./utils/titleCheck");
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+// Web-Dashboard starten (läuft im selben Prozess)
+require("./web/server");
 
-let liveCache = new Set();
-let activity = {};
-
-client.once("ready", () => {
-    console.log(`🍊 Orange City PRO Bot online: ${client.user.tag}`);
-    startLiveChecks();
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds]
 });
 
-async function startLiveChecks() {
-    setInterval(async () => {
-        db.all("SELECT * FROM streamers", [], async (err, rows) => {
-            if(err) return console.error(err);
+const liveCache = new Set();
+const activity = Object.create(null);
 
-            for(const s of rows) {
-                if(s.platform === "twitch") {
-                    const res = await checkTwitchLive(s.name);
-                    if(res.live && !liveCache.has(s.name)) {
-                        if(!validateTitle(res.title)) continue;
-                        sendLiveMessage(s.name, res.url, res.title, "Twitch");
-                        activity[s.name] = (activity[s.name] || 0) + 1;
-                        checkStreamerPlus(s.name);
-                        liveCache.add(s.name);
-                    }
-                    if(!res.live) liveCache.delete(s.name);
-                }
-                if(s.platform === "tiktok") {
-                    const live = await checkTikTokLive(s.name);
-                    if(live && !liveCache.has(s.name)) {
-                        sendLiveMessage(s.name, `https://tiktok.com/@${s.name}`, "TikTok LIVE", "TikTok");
-                        activity[s.name] = (activity[s.name] || 0) + 1;
-                        checkStreamerPlus(s.name);
-                        liveCache.add(s.name);
-                    }
-                }
+client.once("ready", () => {
+  console.log(`🍊 Orange City PRO Bot online: ${client.user.tag}`);
+  startLiveChecks();
+});
+
+function startLiveChecks() {
+  // Alle 60s prüfen
+  setInterval(async () => {
+    db.all("SELECT * FROM streamers", [], async (err, rows) => {
+      if (err) return console.error("DB error:", err);
+
+      for (const s of rows) {
+        try {
+          if (s.platform === "twitch") {
+            const res = await checkTwitchLive(s.name);
+
+            if (res.live && !liveCache.has(`twitch:${s.name}`)) {
+              if (!validateTitle(res.title)) continue;
+
+              await sendLiveMessage(s.name, res.url, res.title, "Twitch");
+              activity[`twitch:${s.name}`] = (activity[`twitch:${s.name}`] || 0) + 1;
+
+              await checkStreamerPlus(s.name);
+              liveCache.add(`twitch:${s.name}`);
             }
-        });
-    }, 60000);
-}
 
-function sendLiveMessage(name, url, title, platform) {
-    const channel = client.channels.cache.get(process.env.CHANNEL_ID);
-    if(!channel) return;
+            if (!res.live) liveCache.delete(`twitch:${s.name}`);
+          }
 
-    channel.send({
-        content: `<@&${process.env.ROLE_ID}> 🔴 ${name} ist LIVE auf ${platform}!\n**${title}**\n${url}`
+          if (s.platform === "tiktok") {
+            const live = await checkTikTokLive(s.name);
+
+            if (live && !liveCache.has(`tiktok:${s.name}`)) {
+              await sendLiveMessage(
+                s.name,
+                `https://tiktok.com/@${s.name}`,
+                "TikTok LIVE",
+                "TikTok"
+              );
+
+              activity[`tiktok:${s.name}`] = (activity[`tiktok:${s.name}`] || 0) + 1;
+
+              await checkStreamerPlus(s.name);
+              liveCache.add(`tiktok:${s.name}`);
+            }
+
+            if (!live) liveCache.delete(`tiktok:${s.name}`);
+          }
+        } catch (e) {
+          console.error(`LiveCheck error for ${s.platform}:${s.name}`, e);
+        }
+      }
     });
+  }, 60_000);
 }
 
-function checkStreamerPlus(name) {
-    if(activity[name] >= 5) {
-        const guild = client.guilds.cache.first();
-        const member = guild.members.cache.find(m => m.user.username.toLowerCase() === name.toLowerCase());
-        if(member) member.roles.add(process.env.STREAMERPLUS_ROLE).catch(() => {});
-    }
+async function sendLiveMessage(name, url, title, platform) {
+  const channelId = process.env.CHANNEL_ID;
+  if (!channelId) return console.error("Missing CHANNEL_ID in env");
+
+  // fetch() ist robuster als nur cache.get()
+  const channel = await client.channels.fetch(channelId).catch(() => null); // [4](https://stackoverflow.com/questions/76921952/how-can-i-get-the-channel-from-my-interaction-discord-js-v14)[5](https://discord.js.org/docs/packages/discord.js/main/ChannelManager:Class)
+  if (!channel) return console.error("Channel not found / no access:", channelId);
+
+  const roleId = process.env.ROLE_ID;
+  const ping = roleId ? `<@&${roleId}> ` : "";
+
+  await channel.send({
+    content: `${ping}🔴 ${name} ist LIVE auf ${platform}!\n**${title}**\n${url}`
+  });
+}
+
+async function checkStreamerPlus(name) {
+  const plusRoleId = process.env.STREAMERPLUS_ROLE;
+  if (!plusRoleId) return;
+
+  // Beispiel: nach 5 Aktivitäten
+  const keyTwitch = `twitch:${name}`;
+  const keyTikTok = `tiktok:${name}`;
+  const count = (activity[keyTwitch] || 0) + (activity[keyTikTok] || 0);
+
+  if (count < 5) return;
+
+  const guild = client.guilds.cache.first();
+  if (!guild) return;
+
+  // Member-Cache kann unvollständig sein, deswegen fetch wir die Memberliste nicht komplett,
+  // sondern versuchen nur, wenn Member bereits im Cache ist (schont Rate Limits).
+  const member = guild.members.cache.find(
+    (m) => m.user.username.toLowerCase() === name.toLowerCase()
+  );
+
+  if (!member) return;
+
+  await member.roles.add(plusRoleId).catch(() => {});
 }
 
 client.login(process.env.DISCORD_TOKEN);
-const sqlite3 = require("sqlite3").verbose();
-const db = new sqlite3.Database("./database.db");
-
-db.run(`CREATE TABLE IF NOT EXISTS streamers (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT,
-    platform TEXT
-)`);
-
-module.exports = db;
-const db = require("../database");
-
-module.exports = {
-    name: "addstreamer",
-    async execute(interaction) {
-        const name = interaction.options.getString("name");
-        const platform = interaction.options.getString("platform");
-
-        db.run(`INSERT INTO streamers (name, platform) VALUES (?, ?)`, [name, platform]);
-        interaction.reply(`✅ ${name} wurde als ${platform}-Streamer hinzugefügt!`);
-    }
-};
-const fetch = require("node-fetch");
-const { WebcastPushConnection } = require("tiktok-live-connector");
-
-async function checkTwitchLive(user) {
-    const res = await fetch(`https://api.twitch.tv/helix/streams?user_login=${user}`, {
-        headers: {
-            "Client-ID": process.env.TWITCH_CLIENT_ID,
-            "Authorization": `Bearer ${process.env.TWITCH_TOKEN}`
-        }
-    });
-    const data = await res.json();
-    if(data.data.length > 0) return { live: true, title: data.data[0].title, url: `https://twitch.tv/${user}` };
-    return { live: false };
-}
-
-async function checkTikTokLive(user) {
-    try {
-        const tiktok = new WebcastPushConnection(user);
-        await tiktok.connect();
-        return true; // Simplified: erkennt wenn live
-    } catch { return false; }
-}
-
-module.exports = { checkTwitchLive, checkTikTokLive };
-function validateTitle(title) {
-    const t = title.toLowerCase();
-    return t.includes("ocity") || t.includes("orange city");
-}
-
-module.exports = { validateTitle };
-const express = require("express");
-const db = require("../database");
-const app = express();
-
-app.use(express.static("public"));
-
-app.get("/streamers", (req, res) => {
-    db.all("SELECT * FROM streamers", [], (err, rows) => {
-        if(err) return res.status(500).send(err);
-        res.json(rows);
-    });
-});
-
-app.listen(process.env.WEB_PORT || 3000, () => console.log("🌐 Dashboard läuft"));
-DISCORD_TOKEN=DEIN_DISCORD_BOT_TOKEN
-CHANNEL_ID=STREAMER_CHANNEL_ID
-ROLE_ID=STREAMER_PING_ROLE
-STREAMERPLUS_ROLE=STREAMERPLUS_ROLE_ID
-
-TWITCH_CLIENT_ID=DEIN_TWITCH_CLIENT_ID
-TWITCH_TOKEN=DEIN_TWITCH_ACCESS_TOKEN
-
-WEB_PORT=3000
